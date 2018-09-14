@@ -351,7 +351,7 @@ bool sb_update_outputs(SLAMBenchLibraryHelper *lib, const slambench::TimeStamp *
         frame_output->AddPoint(ts,
                                new slambench::values::FrameValue(inputSize.x, inputSize.y,
                                                                  slambench::io::pixelformat::EPixelFormat::D_I_16,
-                                                                 depth_est->data));
+                                                                 depth_est.data));
     }
 
 
