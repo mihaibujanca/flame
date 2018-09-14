@@ -20,7 +20,7 @@
  * @date 2016-09-16 13:17:54 (Fri)
  */
 
-#include "flame/flame.h"
+#include <flame/flame.h>
 
 #include <stdio.h>
 #include <limits>
@@ -28,7 +28,7 @@
 #include <random>
 #include <unordered_set>
 #include <atomic>
-
+#include <iostream>
 #include <opencv2/highgui/highgui.hpp>
 
 #include "flame/stereo/epipolar_geometry.h"
@@ -151,8 +151,7 @@ bool Flame::update(double time, uint32_t img_id,
 
   // Remember to increment counter.
   num_imgs_++;
-
-  if (is_poseframe) {
+    if (is_poseframe) {
     // Add to poseframes.
     pfs_mtx_.lock();
     pfs_[fnew_->id] = fnew_;
@@ -188,7 +187,7 @@ bool Flame::update(double time, uint32_t img_id,
     pfs_mtx_.lock();
     int num_pfs = pfs_.size();
     pfs_mtx_.unlock();
-
+    std::cout<<"Number of poseframes:"<<num_pfs<<std::endl;
     // Fill in comparison frame info.
     utils::Frame::ConstPtr fcmp;
     if (num_pfs <= 1) {
@@ -251,6 +250,7 @@ bool Flame::update(double time, uint32_t img_id,
   if ((feats_.size() == 0) && (new_feats_.size() == 0)) {
     // No features to add.
     new_feats_mtx_.unlock();
+    std::cout<<"Feature adding failed."<<std::endl;
     return false;
   }
 

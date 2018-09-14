@@ -35,7 +35,7 @@
 #include <opencv2/core/core.hpp>
 #include <opencv2/features2d/features2d.hpp>
 
-#include "flame/types.h"
+#include <flame/types.h>
 #include "flame/params.h"
 
 #include "flame/optimizers/nltgv2_l1_graph_regularizer.h"
