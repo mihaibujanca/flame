@@ -1,3 +1,4 @@
+add_definitions(-fPIC)
 # Build main library.
 set(FLAME_SRCS
         flame/flame.h
@@ -35,29 +36,50 @@ set(FLAME_SRCS
         flame/utils/rasterization.cc
         flame/utils/stats_tracker.h
         flame/utils/triangulator.h
-        flame/utils/visualization.h
-        flame/flame_library.cpp)
+        flame/utils/visualization.h)
 
-add_library(${appname} SHARED ${FLAME_SRCS})
+add_library(${appname}-core SHARED ${FLAME_SRCS})
 
-target_link_libraries(${appname}
+target_link_libraries(${appname}-core
         ${common_libraries}
         ${OpenCV_LIBS}
         ${Boost_LIBRARIES})
-set_target_properties(${PROJECT_NAME} PROPERTIES LINKER_LANGUAGE CXX)
+set_target_properties(${appname}-core PROPERTIES LINKER_LANGUAGE CXX COMPILE_FLAGS "-fPIC")
 
 install(FILES
-        ${PROJECT_BINARY_DIR}/lib/cmake/${PROJECT_NAME}/${PROJECT_NAME}Config.cmake
-        ${PROJECT_BINARY_DIR}/lib/cmake/${PROJECT_NAME}/${PROJECT_NAME}ConfigVersion.cmake
-        DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/cmake/${PROJECT_NAME})
+        ${PROJECT_BINARY_DIR}/lib/cmake/${appname}-core/${appname}-coreConfig.cmake
+        ${PROJECT_BINARY_DIR}/lib/cmake/${appname}-core/${appname}-coreConfigVersion.cmake
+        DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/cmake/${appname}-core)
 
-install(TARGETS ${appname}
+install(TARGETS ${appname}-core
         ARCHIVE DESTINATION lib
         LIBRARY DESTINATION lib
         RUNTIME DESTINATION bin)
 
+# build slambench flame library
+add_library(${appname} SHARED
+            flame/flame_library.cpp
+            flame/utils.h
+            flame/utils.cc)
+
+set_target_properties(${appname} PROPERTIES COMPILE_FLAGS "-fPIC")
+
+target_link_libraries(${appname}
+                      ${appname}-core
+                      ${OpenCV_LIBS}
+                      ${PCL_LIBRARIES})
+
+target_include_directories(${appname} PUBLIC
+        ${EIGEN3_INCLUDE_DIRS}
+        ${PCL_INCLUDE_DIRS}
+        ${Boost_INCLUDE_DIRS}
+        ${Sophus_INCLUDE_DIRS}
+        )
+
 generate_slam_library(${appname})
+
 message("OpenCV LIBS: " ${OpenCV_LIBS})
 message("OpenCV Includes: " ${OpenCV_INCLUDE_DIRS})
-target_link_libraries(${appname}-library ${OpenCV_LIBS})
-target_include_directories(${appname}-library PRIVATE ${OpenCV_INCLUDE_DIRS})
+message("PCL INCUDES: " ${PCL_INCLUDE_DIRS})
+#target_link_libraries(${appname}-library ${OpenCV_LIBS} ${appname})
+#target_include_directories(${appname}-library PRIVATE ${OpenCV_INCLUsDE_DIRS})

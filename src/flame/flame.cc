@@ -713,10 +713,6 @@ void Flame::detectionLoop() {
         return detection_queue_.size() > 0;
       });
 
-    if (!params_.debug_quiet) {
-      printf("I HAS %i POSEFRAMES\n", detection_queue_.size());
-    }
-
     while (detection_queue_.size() > 0) {
       stats_.tick("detection_loop");
 

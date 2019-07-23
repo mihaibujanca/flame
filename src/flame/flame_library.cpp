@@ -20,6 +20,8 @@
 #include <io/sensor/CameraSensor.h>
 #include <io/sensor/CameraSensorFinder.h>
 #include <io/sensor/GroundTruthSensor.h>
+#include <io/FrameSource.h>
+#include <outputs/TrajectoryInterface.h>
 #include <stdexcept>
 #include <Eigen/Core>
 
@@ -30,13 +32,16 @@
 
 #include "./utils.h"
 #include "types.h"
+#include <opencv2/highgui/highgui.hpp>
 namespace fu = flame::utils;
 
+static slambench::io::CameraSensor *grey_sensor = nullptr;
 static slambench::io::CameraSensor *rgb_sensor;
-static slambench::io::GroundTruthSensor *gt_sensor;
+static slambench::io::GroundTruthSensor *gt_sensor = nullptr;
 static flame::Flame* sensor_;
-static cv::Mat3b *img;
-
+cv::Mat1b *img_gray;
+slambench::outputs::BaseOutput * gt_trajectory;
+static cv::Mat* imRGB = NULL;
 flame::Params params_;
 static sb_uint2 inputSize;
 int poseframe_subsample_factor; // Create a poseframe every this number of images.
@@ -51,14 +56,14 @@ Sophus::SE3f prev_pose_;
 double timestamp;
 double prev_time_;
 float min_depth;
-    static slambench::TimeStamp last_frame_timestamp;
+static slambench::TimeStamp last_frame_timestamp;
 
 
 
 //=========================================================================
 // Variable parameters
 //=========================================================================
-double default_depth_scale_factor = 1;
+double default_depth_scale_factor = 5000;
 int default_poseframe_subsample_factor = 6;
 float default_min_depth = 0.1;
 
@@ -102,8 +107,8 @@ bool sb_new_slam_configuration(SLAMBenchLibraryHelper * slam_settings)
                                                     "Number of pyramid levels used for features.",
                                                     &poseframe_subsample_factor, &default_poseframe_subsample_factor));
     slam_settings->addParameter(TypedParameter<float>("", "min_depth",
-                                                    "Min depth.",
-                                                    &min_depth, &default_min_depth));
+                                                      "Min depth.",
+                                                      &min_depth, &default_min_depth));
 
     /*==================== Threading Params ====================*/
 
@@ -192,14 +197,11 @@ bool sb_new_slam_configuration(SLAMBenchLibraryHelper * slam_settings)
     return true;
 }
 
-
-//const uint32_t img_id, const double time, const Sophus::SE3f &pose,
-//const cv::Mat3b &rgb, const cv::Mat1f &depth)
 bool sb_init_slam_system(SLAMBenchLibraryHelper * slam_settings)
 {
 
     slambench::io::CameraSensorFinder sensor_finder;
-    rgb_sensor = sensor_finder.FindOne(slam_settings->get_sensors(), {{"camera_type", "rgb"}});
+
     for(auto sensor : slam_settings->get_sensors())
         if(sensor->GetType() == slambench::io::GroundTruthSensor::kGroundTruthTrajectoryType)
         {
@@ -212,34 +214,39 @@ bool sb_init_slam_system(SLAMBenchLibraryHelper * slam_settings)
         return false;
     }
 
-    if (rgb_sensor == nullptr) {
-        std::cerr << "Invalid sensors found, rgb not found." << std::endl;
+    grey_sensor = sensor_finder.FindOne(slam_settings->get_sensors(), {{"camera_type", "grey"}});
+    if (grey_sensor == nullptr) {
+        std::cerr << "Invalid sensors found, Grey not found." << std::endl;
         return false;
     }
-
-    if (rgb_sensor->PixelFormat != slambench::io::pixelformat::RGB_III_888) {
-        std::cerr << "rgb sensor is not in RGB_III_888 format" << std::endl;
+    //// check sensor frame and pixel format
+    if(grey_sensor->PixelFormat != slambench::io::pixelformat::G_I_8) {
+        std::cerr << "Grey sensor is not in G_I_8 format" << std::endl;
         return false;
     }
-
-    if (rgb_sensor->FrameFormat != slambench::io::frameformat::Raster) {
-        std::cerr << "rgb sensor is not in Raster format" << std::endl;
-        return false;
+    if(grey_sensor->FrameFormat != slambench::io::frameformat::Raster) {
+        std::cerr << "Grey sensor is not in raster format" << std::endl;
     }
 
-    K << rgb_sensor->Intrinsics[0], 0, rgb_sensor->Intrinsics[1],
-         0, rgb_sensor->Intrinsics[2], rgb_sensor->Intrinsics[3],
-         0,0,1;
+    rgb_sensor = sensor_finder.FindOne(slam_settings->get_sensors(), {{"camera_type", "rgb"}});
+    //if (rgb_sensor == nullptr) {
+    //    std::cerr << "Invalid sensors found, RGB not found." << std::endl;
+    //    return false;
+    //}
 
-    sensor_ = new flame::Flame(rgb_sensor->Width,
-                               rgb_sensor->Height,
+    K << grey_sensor->Intrinsics[0]*grey_sensor->Width, 0, grey_sensor->Intrinsics[1]*grey_sensor->Height,
+            0, grey_sensor->Intrinsics[2]*grey_sensor->Width, grey_sensor->Intrinsics[3]*grey_sensor->Height,
+            0,0,1;
+
+    sensor_ = new flame::Flame(grey_sensor->Width,
+                               grey_sensor->Height,
                                K,
                                K.inverse(),
                                params_);
 
-
-    img = new cv::Mat3b(rgb_sensor->Height, rgb_sensor->Width, CV_8UC3);
-    inputSize = make_sb_uint2(rgb_sensor->Width, rgb_sensor->Height);
+    imRGB = new cv::Mat;// ( rgb_sensor->Height ,  rgb_sensor->Width, CV_8UC3);
+    img_gray = new cv::Mat1b(grey_sensor->Height, grey_sensor->Width, CV_8UC1);
+    inputSize = make_sb_uint2(grey_sensor->Width, grey_sensor->Height);
 
 
     //=========================================================================
@@ -251,10 +258,15 @@ bool sb_init_slam_system(SLAMBenchLibraryHelper * slam_settings)
     slam_settings->GetOutputManager().RegisterOutput(frame_output);
     frame_output->SetActive(true);
 
-    pointcloud_output = new slambench::outputs::Output("PointCloud", slambench::values::VT_POINTCLOUD);
-    pointcloud_output->SetKeepOnlyMostRecent(true);
-    slam_settings->GetOutputManager().RegisterOutput(pointcloud_output);
-    pointcloud_output->SetActive(true);
+
+    rgb_frame_output = new slambench::outputs::Output("RGB Frame", slambench::values::VT_FRAME);
+    //rgb_frame_output->SetKeepOnlyMostRecent(true);
+    //slam_settings->GetOutputManager().RegisterOutput(rgb_frame_output);
+
+    //pointcloud_output = new slambench::outputs::Output("PointCloud", slambench::values::VT_POINTCLOUD);
+    //pointcloud_output->SetKeepOnlyMostRecent(true);
+    //slam_settings->GetOutputManager().RegisterOutput(pointcloud_output);
+    //pointcloud_output->SetActive(true);
 
     pose_output = new slambench::outputs::Output("Pose", slambench::values::VT_POSE, true);
     slam_settings->GetOutputManager().RegisterOutput(pose_output);
@@ -264,39 +276,47 @@ bool sb_init_slam_system(SLAMBenchLibraryHelper * slam_settings)
 
 }
 
-bool sb_update_frame(SLAMBenchLibraryHelper * , slambench::io::SLAMFrame* s)
+bool grey_ready = false, gt_ready = false;
+std::vector<Sophus::SE3f> poses;
+bool sb_update_frame(SLAMBenchLibraryHelper * slam_settings, slambench::io::SLAMFrame* s)
 {
-
-    if (s->FrameSensor == rgb_sensor)
-    {
-        //std::cout<<"Frame size:"<<s->GetSize()<<std::endl;
-        memcpy(img->data, s->GetData(), s->GetSize());
+    if(s->FrameSensor == grey_sensor) {
+        memcpy(img_gray->data, s->GetData(), s->GetSize());
+        last_frame_timestamp = s->Timestamp;
+        timestamp = s->Timestamp.ToS();
+        s->FreeData();
+        grey_ready = true;
+        std::cerr<<"Gray READY"<<std::endl;
     }
-    else if( s->FrameSensor == gt_sensor)
+    else if(s->FrameSensor == rgb_sensor) {
+        memcpy(imRGB->data, s->GetData(), s->GetSize());
+        last_frame_timestamp = s->Timestamp;
+        timestamp = s->Timestamp.ToS();
+        s->FreeData();
+    }
+    if( s->FrameSensor == gt_sensor)
     {
         Eigen::Matrix4f p;
         memcpy(p.data(), s->GetData(), s->GetSize());
         pose = Sophus::SE3f(p);
+        s->FreeData();
+        gt_ready = true;
     }
-    else
-        return false;
 
-    s->FreeData();
-    last_frame_timestamp = s->Timestamp;
-    timestamp = s->Timestamp.ToS();
-    return true;
+    return grey_ready && gt_ready;
 }
 
 bool sb_process_once (SLAMBenchLibraryHelper * slam_settings)  {
-    if (img == NULL || img->empty())
+    std::cerr<<"Img id:"<<img_id<<std::endl;
+    if (img_gray == NULL || img_gray->empty())
+    {
+        std::cout<<"PULAMEA"<<std::endl;
         return false;
+    }
     img_id++;
 
-    cv::Mat1b img_gray;
-    cv::cvtColor(*img, img_gray, cv::COLOR_RGB2GRAY);
-
     bool is_poseframe = (img_id % poseframe_subsample_factor) == 0;
-    bool update_success = sensor_->update(timestamp, img_id, pose, img_gray, is_poseframe);
+    bool update_success = sensor_->update(timestamp, img_id, pose, *img_gray, is_poseframe);
 
     if (max_angular_rate_ > 0.0f) {
         // Check angle difference between last and current pose. If we're rotating,
@@ -310,95 +330,57 @@ bool sb_process_once (SLAMBenchLibraryHelper * slam_settings)  {
         prev_pose_ = pose;
 
     }
+    grey_ready = false;
+    gt_ready = false;
     return true;
 }
-
-
 
 bool sb_clean_slam_system()
 {
     delete sensor_;
     delete gt_sensor;
-    delete rgb_sensor;
+    delete grey_sensor;
 
     return true;
 }
 
-
 bool sb_update_outputs(SLAMBenchLibraryHelper *lib, const slambench::TimeStamp *latest_output)
 {
     slambench::TimeStamp ts = *latest_output;
-
     cv::Mat1f idepthmap;
     sensor_->getFilteredInverseDepthMap(&idepthmap);
 
-    // Convert to depths.
     cv::Mat1f depth_est(idepthmap.rows, idepthmap.cols,
                         std::numeric_limits<float>::quiet_NaN());
-#pragma omp parallel for collapse(2) num_threads(params_.omp_num_threads) schedule(dynamic, params_.omp_chunk_size) // NOLINT
     for (int ii = 0; ii < depth_est.rows; ++ii) {
         for (int jj = 0; jj < depth_est.cols; ++jj) {
-            float idepth = idepthmap(ii, jj);
+            float idepth =  idepthmap(ii, jj);
             if (!std::isnan(idepth) && (idepth > 0)) {
-                depth_est(ii, jj) = 1.0f / idepth;
+                depth_est(ii, jj) = 1.0f/ idepth;
             }
         }
     }
+    cv::Mat output(depth_est.rows,depth_est.cols,CV_8UC1);
+    depth_est.convertTo(output,CV_8UC1);
     if(frame_output->IsActive()) {
 
 
         // add estimated depth
         frame_output->AddPoint(ts,
                                new slambench::values::FrameValue(inputSize.x, inputSize.y,
-                                                                 slambench::io::pixelformat::EPixelFormat::D_I_16,
-                                                                 depth_est.data));
+                                                                 slambench::io::pixelformat::G_I_8,
+                                                                 (void*)output.data));
     }
 
-
-    // Update point cloud
-    if(pointcloud_output->IsActive()) {
-
-        float max_depth = (params_.do_idepth_triangle_filter) ?
-                          1.0f / params_.min_triangle_idepth : std::numeric_limits<float>::max();
-        int height = depth_est.rows;
-        int width = depth_est.cols;
-        slambench::values::PointCloudValue *point_cloud = new slambench::values::PointCloudValue();
-
-        for (int ii = 0; ii < height; ++ii) {
-            for (int jj = 0; jj < width; ++jj) {
-                float depth = depth_est(ii, jj);
-
-                slambench::values::Point3DF new_vertex;
-                if (std::isnan(depth) || (depth < min_depth) || (depth > max_depth)) {
-                    // Add invalid value to skip this point. Note that the initial value
-                    // is (0, 0, 0), so you must manually invalidate the point.
-                    new_vertex.X = std::numeric_limits<float>::quiet_NaN();
-                    new_vertex.Y = std::numeric_limits<float>::quiet_NaN();
-                    new_vertex.Z = std::numeric_limits<float>::quiet_NaN();
-                    continue;
-                }
-                else
-                {
-                    Eigen::Vector3f xyz(jj * depth, ii * depth, depth);
-                    xyz = K.inverse() * xyz;
-
-                    new_vertex.X = xyz(0);
-                    new_vertex.Y = xyz(1);
-                    new_vertex.Z = xyz(2);
-                }
-
-                point_cloud->AddPoint(new_vertex);
-            }
-        }
-
-        // Take lock only after generating the map
-        std::lock_guard<FastLock> lock (lib->GetOutputManager().GetLock());
-        pointcloud_output->AddPoint(ts, point_cloud);
-    }
     if(pose_output->IsActive()) {
         // Get the current pose as an eigen matrix
         std::lock_guard<FastLock> lock (lib->GetOutputManager().GetLock());
-        pose_output->AddPoint(last_frame_timestamp, new slambench::values::PoseValue(pose.matrix()));
+        pose_output->AddPoint(ts, new slambench::values::PoseValue(pose.matrix()));
+    }
+
+    if(rgb_frame_output->IsActive()) {
+        std::lock_guard<FastLock> lock (lib->GetOutputManager().GetLock());
+        rgb_frame_output->AddPoint(ts, new slambench::values::FrameValue(inputSize.x, inputSize.y, slambench::io::pixelformat::RGB_III_888, (void*)imRGB->data));
     }
     return true;
 }
