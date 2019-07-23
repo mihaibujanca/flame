@@ -1,15 +1,7 @@
 #include <vector>
 #include <string>
 #include <iostream>
-#include <algorithm>
 #include <sophus/se3.hpp>
-#include <stdio.h>
-#include <sys/stat.h>
-#include <cstdio>
-#include <random>
-#include <memory>
-#include <limits>
-#include <vector>
 #include <opencv2/opencv.hpp>
 #include <opencv2/core/core.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
@@ -20,28 +12,16 @@
 #include <io/sensor/CameraSensor.h>
 #include <io/sensor/CameraSensorFinder.h>
 #include <io/sensor/GroundTruthSensor.h>
-#include <io/FrameSource.h>
-#include <outputs/TrajectoryInterface.h>
-#include <stdexcept>
 #include <Eigen/Core>
 
 #include "flame.h"
-#include "utils/image_utils.h"
-#include "utils/stats_tracker.h"
-#include "utils/load_tracker.h"
-
-#include "./utils.h"
-#include "types.h"
-#include <opencv2/highgui/highgui.hpp>
-namespace fu = flame::utils;
 
 static slambench::io::CameraSensor *grey_sensor = nullptr;
 static slambench::io::CameraSensor *rgb_sensor;
 static slambench::io::GroundTruthSensor *gt_sensor = nullptr;
 static flame::Flame* sensor_;
 cv::Mat1b *img_gray;
-slambench::outputs::BaseOutput * gt_trajectory;
-static cv::Mat* imRGB = NULL;
+static cv::Mat* imRGB = nullptr;
 flame::Params params_;
 static sb_uint2 inputSize;
 int poseframe_subsample_factor; // Create a poseframe every this number of images.
@@ -56,7 +36,6 @@ Sophus::SE3f prev_pose_;
 double timestamp;
 double prev_time_;
 float min_depth;
-static slambench::TimeStamp last_frame_timestamp;
 
 
 
@@ -92,6 +71,7 @@ bool default_check_sticky_obstacles = false;
 //=========================================================================
 
 slambench::outputs::Output *frame_output = nullptr;
+slambench::outputs::Output *rgb_frame_output = nullptr;
 slambench::outputs::Output *pointcloud_output = nullptr;
 static slambench::outputs::Output *pose_output = nullptr; // SLAMBench requires a pose output
 
@@ -229,10 +209,6 @@ bool sb_init_slam_system(SLAMBenchLibraryHelper * slam_settings)
     }
 
     rgb_sensor = sensor_finder.FindOne(slam_settings->get_sensors(), {{"camera_type", "rgb"}});
-    //if (rgb_sensor == nullptr) {
-    //    std::cerr << "Invalid sensors found, RGB not found." << std::endl;
-    //    return false;
-    //}
 
     K << grey_sensor->Intrinsics[0]*grey_sensor->Width, 0, grey_sensor->Intrinsics[1]*grey_sensor->Height,
             0, grey_sensor->Intrinsics[2]*grey_sensor->Width, grey_sensor->Intrinsics[3]*grey_sensor->Height,
@@ -244,7 +220,7 @@ bool sb_init_slam_system(SLAMBenchLibraryHelper * slam_settings)
                                K.inverse(),
                                params_);
 
-    imRGB = new cv::Mat;// ( rgb_sensor->Height ,  rgb_sensor->Width, CV_8UC3);
+    imRGB = new cv::Mat(rgb_sensor->Height ,  rgb_sensor->Width, CV_8UC3);
     img_gray = new cv::Mat1b(grey_sensor->Height, grey_sensor->Width, CV_8UC1);
     inputSize = make_sb_uint2(grey_sensor->Width, grey_sensor->Height);
 
@@ -260,13 +236,8 @@ bool sb_init_slam_system(SLAMBenchLibraryHelper * slam_settings)
 
 
     rgb_frame_output = new slambench::outputs::Output("RGB Frame", slambench::values::VT_FRAME);
-    //rgb_frame_output->SetKeepOnlyMostRecent(true);
-    //slam_settings->GetOutputManager().RegisterOutput(rgb_frame_output);
-
-    //pointcloud_output = new slambench::outputs::Output("PointCloud", slambench::values::VT_POINTCLOUD);
-    //pointcloud_output->SetKeepOnlyMostRecent(true);
-    //slam_settings->GetOutputManager().RegisterOutput(pointcloud_output);
-    //pointcloud_output->SetActive(true);
+    rgb_frame_output->SetKeepOnlyMostRecent(true);
+    slam_settings->GetOutputManager().RegisterOutput(rgb_frame_output);
 
     pose_output = new slambench::outputs::Output("Pose", slambench::values::VT_POSE, true);
     slam_settings->GetOutputManager().RegisterOutput(pose_output);
@@ -282,15 +253,12 @@ bool sb_update_frame(SLAMBenchLibraryHelper * slam_settings, slambench::io::SLAM
 {
     if(s->FrameSensor == grey_sensor) {
         memcpy(img_gray->data, s->GetData(), s->GetSize());
-        last_frame_timestamp = s->Timestamp;
         timestamp = s->Timestamp.ToS();
         s->FreeData();
         grey_ready = true;
-        std::cerr<<"Gray READY"<<std::endl;
     }
     else if(s->FrameSensor == rgb_sensor) {
         memcpy(imRGB->data, s->GetData(), s->GetSize());
-        last_frame_timestamp = s->Timestamp;
         timestamp = s->Timestamp.ToS();
         s->FreeData();
     }
@@ -307,23 +275,21 @@ bool sb_update_frame(SLAMBenchLibraryHelper * slam_settings, slambench::io::SLAM
 }
 
 bool sb_process_once (SLAMBenchLibraryHelper * slam_settings)  {
-    std::cerr<<"Img id:"<<img_id<<std::endl;
-    if (img_gray == NULL || img_gray->empty())
-    {
-        std::cout<<"PULAMEA"<<std::endl;
-        return false;
-    }
-    img_id++;
 
     bool is_poseframe = (img_id % poseframe_subsample_factor) == 0;
     bool update_success = sensor_->update(timestamp, img_id, pose, *img_gray, is_poseframe);
+    if(!update_success)
+    {
+        std::cerr<<"Update failed for FLAME for image:"<<img_id<<std::endl;
+    }
+    img_id++;
 
     if (max_angular_rate_ > 0.0f) {
         // Check angle difference between last and current pose. If we're rotating,
         // we shouldn't publish output since it's probably too noisy.
         Eigen::Quaternionf q_delta = pose.unit_quaternion() *
                                      prev_pose_.unit_quaternion().inverse();
-        float angle_delta = fu::fast_abs(Eigen::AngleAxisf(q_delta).angle());
+        float angle_delta = flame::utils::fast_abs(Eigen::AngleAxisf(q_delta).angle());
         float angle_rate = angle_delta / (timestamp - prev_time_);
 
         prev_time_ = timestamp;

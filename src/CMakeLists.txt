@@ -58,9 +58,7 @@ install(TARGETS ${appname}-core
 
 # build slambench flame library
 add_library(${appname} SHARED
-            flame/flame_library.cpp
-            flame/utils.h
-            flame/utils.cc)
+            flame/flame_library.cpp)
 
 set_target_properties(${appname} PROPERTIES COMPILE_FLAGS "-fPIC")
 
