@@ -10,6 +10,7 @@
 #include <SLAMBenchAPI.h>
 #include <io/SLAMFrame.h>
 #include <io/sensor/CameraSensor.h>
+#include <io/sensor/DepthSensor.h>
 #include <io/sensor/CameraSensorFinder.h>
 #include <io/sensor/GroundTruthSensor.h>
 #include <Eigen/Core>
@@ -18,10 +19,12 @@
 
 static slambench::io::CameraSensor *grey_sensor;
 static slambench::io::CameraSensor *rgb_sensor;
+static slambench::io::DepthSensor *depth_sensor;
 static slambench::io::GroundTruthSensor *gt_sensor;
 static flame::Flame* flame_obj;
 cv::Mat1b *img_gray;
 static cv::Mat* imRGB = nullptr;
+static cv::Mat* imD = nullptr;
 flame::Params params_;
 static sb_uint2 inputSize;
 int poseframe_subsample_factor; // Create a poseframe every this number of images.
@@ -70,8 +73,9 @@ bool default_check_sticky_obstacles = false;
 // SLAMBench output values
 //=========================================================================
 
-static slambench::outputs::Output *frame_output = nullptr;
+static slambench::outputs::Output *depth_est_output = nullptr;
 static slambench::outputs::Output *rgb_frame_output = nullptr;
+static slambench::outputs::Output *gt_depth_output = nullptr;
 static slambench::outputs::Output *pose_output = nullptr; // SLAMBench requires a pose output
 
 
@@ -206,8 +210,29 @@ bool sb_init_slam_system(SLAMBenchLibraryHelper * slam_settings)
     if(grey_sensor->FrameFormat != slambench::io::frameformat::Raster) {
         std::cerr << "Grey sensor is not in raster format" << std::endl;
     }
-
+    depth_sensor = (slambench::io::DepthSensor*)sensor_finder.FindOne(slam_settings->get_sensors(), {{"camera_type", "depth"}});
     rgb_sensor = sensor_finder.FindOne(slam_settings->get_sensors(), {{"camera_type", "rgb"}});
+
+    if(rgb_sensor->FrameFormat != slambench::io::frameformat::Raster) {
+        std::cerr << "RGB data is in wrong format" << std::endl;
+        return false;
+    }
+
+    if(depth_sensor->FrameFormat != slambench::io::frameformat::Raster) {
+        std::cerr << "Depth data is in wrong format" << std::endl;
+        return false;
+    }
+
+    if(rgb_sensor->PixelFormat != slambench::io::pixelformat::RGB_III_888) {
+        std::cerr << "RGB data is in wrong format pixel" << std::endl;
+        return false;
+    }
+
+    if(depth_sensor->PixelFormat != slambench::io::pixelformat::D_I_16) {
+        std::cerr << "Depth data is in wrong pixel format" << std::endl;
+        return false;
+    }
+
 
     K << grey_sensor->Intrinsics[0]*grey_sensor->Width, 0, grey_sensor->Intrinsics[1]*grey_sensor->Height,
             0, grey_sensor->Intrinsics[2]*grey_sensor->Width, grey_sensor->Intrinsics[3]*grey_sensor->Height,
@@ -220,6 +245,7 @@ bool sb_init_slam_system(SLAMBenchLibraryHelper * slam_settings)
                                params_);
 
     imRGB = new cv::Mat(rgb_sensor->Height ,  rgb_sensor->Width, CV_8UC3);
+    imD   = new cv::Mat ( depth_sensor->Height ,  depth_sensor->Width, CV_16UC1);
     img_gray = new cv::Mat1b(grey_sensor->Height, grey_sensor->Width, CV_8UC1);
     inputSize = make_sb_uint2(grey_sensor->Width, grey_sensor->Height);
 
@@ -228,15 +254,19 @@ bool sb_init_slam_system(SLAMBenchLibraryHelper * slam_settings)
     // DECLARE OUTPTUS
     //=========================================================================
 
-    frame_output = new slambench::outputs::Output("depth_est", slambench::values::VT_FRAME);
-    frame_output->SetKeepOnlyMostRecent(true);
-    slam_settings->GetOutputManager().RegisterOutput(frame_output);
-    frame_output->SetActive(true);
-
+    depth_est_output = new slambench::outputs::Output("depth_est", slambench::values::VT_FRAME);
+    depth_est_output->SetKeepOnlyMostRecent(true);
+    slam_settings->GetOutputManager().RegisterOutput(depth_est_output);
+    depth_est_output->SetActive(true);
 
     rgb_frame_output = new slambench::outputs::Output("RGB Frame", slambench::values::VT_FRAME);
     rgb_frame_output->SetKeepOnlyMostRecent(true);
     slam_settings->GetOutputManager().RegisterOutput(rgb_frame_output);
+
+    gt_depth_output = new slambench::outputs::Output("depth_gt", slambench::values::VT_FRAME);
+    gt_depth_output->SetKeepOnlyMostRecent(true);
+    slam_settings->GetOutputManager().RegisterOutput(gt_depth_output);
+    gt_depth_output->SetActive(true);
 
     pose_output = new slambench::outputs::Output("Pose", slambench::values::VT_POSE, true);
     slam_settings->GetOutputManager().RegisterOutput(pose_output);
@@ -259,6 +289,10 @@ bool sb_update_frame(SLAMBenchLibraryHelper * slam_settings, slambench::io::SLAM
     else if(s->FrameSensor == rgb_sensor) {
         memcpy(imRGB->data, s->GetData(), s->GetSize());
         timestamp = s->Timestamp.ToS();
+        s->FreeData();
+    }
+    if(s->FrameSensor == depth_sensor) {
+        memcpy(imD->data, s->GetData(), s->GetSize());
         s->FreeData();
     }
     if( s->FrameSensor == gt_sensor)
@@ -326,14 +360,9 @@ bool sb_update_outputs(SLAMBenchLibraryHelper *lib, const slambench::TimeStamp *
     }
     cv::Mat output(depth_est.rows,depth_est.cols,CV_8UC1);
     depth_est.convertTo(output,CV_8UC1);
-    if(frame_output->IsActive()) {
-
-
-        // add estimated depth
-        frame_output->AddPoint(ts,
-                               new slambench::values::FrameValue(inputSize.x, inputSize.y,
-                                                                 slambench::io::pixelformat::D_I_8,
-                                                                 (void*)output.data));
+    if(depth_est_output->IsActive()) {
+        std::lock_guard<FastLock> lock (lib->GetOutputManager().GetLock());
+        depth_est_output->AddPoint(ts, new slambench::values::FrameValue(inputSize.x, inputSize.y, slambench::io::pixelformat::D_I_8, (void*)output.data));
     }
 
     if(pose_output->IsActive()) {
@@ -346,6 +375,15 @@ bool sb_update_outputs(SLAMBenchLibraryHelper *lib, const slambench::TimeStamp *
         std::lock_guard<FastLock> lock (lib->GetOutputManager().GetLock());
         rgb_frame_output->AddPoint(ts, new slambench::values::FrameValue(inputSize.x, inputSize.y, slambench::io::pixelformat::RGB_III_888, (void*)imRGB->data));
     }
+
+    auto scaling = 1./257; // scaling from INT16 to UC8
+    cv::Mat output_gt(depth_est.rows,depth_est.cols,CV_8UC1);
+    imD->convertTo(output_gt,CV_8UC1, scaling);
+    if(gt_depth_output->IsActive()) {
+        std::lock_guard<FastLock> lock (lib->GetOutputManager().GetLock());
+        gt_depth_output->AddPoint(ts, new slambench::values::FrameValue(inputSize.x, inputSize.y, slambench::io::pixelformat::D_I_8, (void*)output_gt.data));
+    }
+
     return true;
 }
 
