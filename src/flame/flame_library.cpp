@@ -70,9 +70,8 @@ bool default_check_sticky_obstacles = false;
 // SLAMBench output values
 //=========================================================================
 
-slambench::outputs::Output *frame_output = nullptr;
-slambench::outputs::Output *rgb_frame_output = nullptr;
-slambench::outputs::Output *pointcloud_output = nullptr;
+static slambench::outputs::Output *frame_output = nullptr;
+static slambench::outputs::Output *rgb_frame_output = nullptr;
 static slambench::outputs::Output *pose_output = nullptr; // SLAMBench requires a pose output
 
 
@@ -229,7 +228,7 @@ bool sb_init_slam_system(SLAMBenchLibraryHelper * slam_settings)
     // DECLARE OUTPTUS
     //=========================================================================
 
-    frame_output = new slambench::outputs::Output("Frame", slambench::values::VT_FRAME);
+    frame_output = new slambench::outputs::Output("depth_est", slambench::values::VT_FRAME);
     frame_output->SetKeepOnlyMostRecent(true);
     slam_settings->GetOutputManager().RegisterOutput(frame_output);
     frame_output->SetActive(true);
@@ -334,7 +333,7 @@ bool sb_update_outputs(SLAMBenchLibraryHelper *lib, const slambench::TimeStamp *
         // add estimated depth
         frame_output->AddPoint(ts,
                                new slambench::values::FrameValue(inputSize.x, inputSize.y,
-                                                                 slambench::io::pixelformat::G_I_8,
+                                                                 slambench::io::pixelformat::D_I_8,
                                                                  (void*)output.data));
     }
 

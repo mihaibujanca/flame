@@ -187,7 +187,7 @@ bool Flame::update(double time, uint32_t img_id,
     pfs_mtx_.lock();
     int num_pfs = pfs_.size();
     pfs_mtx_.unlock();
-    std::cout<<"Number of poseframes:"<<num_pfs<<std::endl;
+//    std::cout<<"Number of poseframes:"<<num_pfs<<std::endl;
     // Fill in comparison frame info.
     utils::Frame::ConstPtr fcmp;
     if (num_pfs <= 1) {
