@@ -16,10 +16,10 @@
 
 #include "flame.h"
 
-static slambench::io::CameraSensor *grey_sensor = nullptr;
+static slambench::io::CameraSensor *grey_sensor;
 static slambench::io::CameraSensor *rgb_sensor;
-static slambench::io::GroundTruthSensor *gt_sensor = nullptr;
-static flame::Flame* sensor_;
+static slambench::io::GroundTruthSensor *gt_sensor;
+static flame::Flame* flame_obj;
 cv::Mat1b *img_gray;
 static cv::Mat* imRGB = nullptr;
 flame::Params params_;
@@ -31,7 +31,7 @@ static int img_id = 0;
 
 Eigen::Matrix3f K;
 Sophus::SE3f pose;
-Sophus::SE3f prev_pose_;
+Sophus::SE3f prev_pose;
 
 double timestamp;
 double prev_time_;
@@ -213,7 +213,7 @@ bool sb_init_slam_system(SLAMBenchLibraryHelper * slam_settings)
             0, grey_sensor->Intrinsics[2]*grey_sensor->Width, grey_sensor->Intrinsics[3]*grey_sensor->Height,
             0,0,1;
 
-    sensor_ = new flame::Flame(grey_sensor->Width,
+    flame_obj = new flame::Flame(grey_sensor->Width,
                                grey_sensor->Height,
                                K,
                                K.inverse(),
@@ -276,7 +276,7 @@ bool sb_update_frame(SLAMBenchLibraryHelper * slam_settings, slambench::io::SLAM
 bool sb_process_once (SLAMBenchLibraryHelper * slam_settings)  {
 
     bool is_poseframe = (img_id % poseframe_subsample_factor) == 0;
-    bool update_success = sensor_->update(timestamp, img_id, pose, *img_gray, is_poseframe);
+    bool update_success = flame_obj->update(timestamp, img_id, pose, *img_gray, is_poseframe);
     if(!update_success)
     {
         std::cerr<<"Update failed for FLAME for image:"<<img_id<<std::endl;
@@ -287,12 +287,12 @@ bool sb_process_once (SLAMBenchLibraryHelper * slam_settings)  {
         // Check angle difference between last and current pose. If we're rotating,
         // we shouldn't publish output since it's probably too noisy.
         Eigen::Quaternionf q_delta = pose.unit_quaternion() *
-                                     prev_pose_.unit_quaternion().inverse();
+                                     prev_pose.unit_quaternion().inverse();
         float angle_delta = flame::utils::fast_abs(Eigen::AngleAxisf(q_delta).angle());
         float angle_rate = angle_delta / (timestamp - prev_time_);
 
         prev_time_ = timestamp;
-        prev_pose_ = pose;
+        prev_pose = pose;
 
     }
     grey_ready = false;
@@ -302,7 +302,6 @@ bool sb_process_once (SLAMBenchLibraryHelper * slam_settings)  {
 
 bool sb_clean_slam_system()
 {
-    delete sensor_;
     delete gt_sensor;
     delete grey_sensor;
 
@@ -313,7 +312,7 @@ bool sb_update_outputs(SLAMBenchLibraryHelper *lib, const slambench::TimeStamp *
 {
     slambench::TimeStamp ts = *latest_output;
     cv::Mat1f idepthmap;
-    sensor_->getFilteredInverseDepthMap(&idepthmap);
+    flame_obj->getFilteredInverseDepthMap(&idepthmap);
 
     cv::Mat1f depth_est(idepthmap.rows, idepthmap.cols,
                         std::numeric_limits<float>::quiet_NaN());
